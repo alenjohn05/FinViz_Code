@@ -64,29 +64,35 @@ export async function getSubcategories(
     }
     db = await dbPool.acquire();
     const results = await db.all(
-      `SELECT name AS category, size
-       FROM ImageNetData
-       WHERE name LIKE ? || ' > %'`,
+      `
+      SELECT name AS category, size
+      FROM ImageNetData
+      WHERE category LIKE ? || ' > %'
+    `,
       [category]
     );
     if (!results.length) {
       res.status(404).send("Category not found");
       return;
     }
-    const response = results.reduce((acc, row) => {
-      const subcategory = row.category.split(' > ')[1];
-      if (!acc[subcategory]) {
-        acc[subcategory] = {
+    const response: ResponseType = {};
+    results.forEach((row) => {
+      const subcategory = row.category
+        .replace(`${category} > `, "")
+        .split(" > ")[0];
+      if (!response[subcategory]) {
+        response[subcategory] = {
           name: category,
           size: row.size,
           children: subcategory,
           next: `${category} > ${subcategory}`
         };
       }
-      return acc;
-    }, {} as Record<string, { name: string; size: number; children: string; next: string }>);
+    });
     const responseArray = Object.values(response);
-    await redisClient.set(cacheKey, JSON.stringify(responseArray), { EX: 3600 });
+    await redisClient.set(cacheKey, JSON.stringify(responseArray), {
+      EX: 3600
+    });
     res.json(responseArray);
   } catch (err) {
     console.error("Error fetching subcategories:", err);
@@ -106,33 +112,21 @@ export async function initialize(): Promise<void> {
 
     const url = config.url;
     const parsedXML = await fetchAndParseXML(url);
-
-    const numWorkers = os.cpus().length;
-    const chunkSize = Math.ceil(
-      parsedXML.ImageNetStructure.synset.length / numWorkers
-    );
-
-    for (let i = 0; i < numWorkers; i++) {
-      const start = i * chunkSize;
-      const end = start + chunkSize;
-      const chunk = parsedXML.ImageNetStructure.synset.slice(start, end);
-
-      const worker = new Worker("./src/workers/dataTransformer.js", {
-        workerData: { chunk, startIndex: start }
-      });
-      worker.on("message", async (data) => {
-        await insertDataToDB(data);
-        console.log(`Worker ${i + 1} completed processing.`);
-      });
-      worker.on("error", (error) => {
-        console.error(`Worker ${i + 1} error:`, error);
-      });
-      worker.on("exit", (code) => {
-        if (code !== 0) {
-          console.error(`Worker ${i + 1} stopped with exit code ${code}`);
-        }
-      });
-    }
+    const worker = new Worker("./src/workers/dataTransformer.js", {
+      workerData: parsedXML
+    });
+    worker.on("message", async (data) => {
+      await insertDataToDB(data);
+      console.log("Data ingested, transformed, and stored successfully.");
+    });
+    worker.on("error", (error) => {
+      console.error("Worker error:", error);
+    });
+    worker.on("exit", (code) => {
+      if (code !== 0) {
+        console.error(`Worker stopped with exit code ${code}`);
+      }
+    });
   } catch (err) {
     console.error("Error during initialization:", err);
   }
@@ -162,3 +156,12 @@ async function insertDataToDB(data: { name: string; size: number }[]) {
     dbPool.release(db);
   }
 }
+
+type ResponseType = {
+  [key: string]: {
+    name: string;
+    size: number;
+    children: string;
+    next: string;
+  };
+};

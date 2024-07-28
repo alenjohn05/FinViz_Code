@@ -8,7 +8,7 @@ const factory = {
       filename: config.database.filename,
       driver: sqlite3.Database,
     });
-    await db.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA cache_size=10000;");
+    await db.exec("PRAGMA journal_mode=WAL;");
     return db;
   },
   destroy: (db: Database) => db.close(),
@@ -29,8 +29,7 @@ export async function initializeDatabase(): Promise<void> {
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT,
         size INTEGER
-      );
-      CREATE INDEX IF NOT EXISTS idx_name ON ImageNetData (name);
+      )
     `);
   } finally {
     dbPool.release(db);

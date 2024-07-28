@@ -1,8 +1,8 @@
 const { parentPort, workerData } = require('worker_threads');
 
-function transformToLinear(data, startIndex) {
+function transformToLinear(data) {
   const linearData = [];
-  function traverse(node, path, index) {
+  function traverse(node, path) {
     if (!node || !node["$"] || !node["$"].words) {
       return;
     }
@@ -10,21 +10,23 @@ function transformToLinear(data, startIndex) {
     const size = node.synset ? node.synset.length : 0;
     linearData.push({ name, size });
     if (node.synset) {
-      for (let i = 0; i < node.synset.length; i++) {
-        traverse(node.synset[i], name, index + i + 1);
+      for (const child of node.synset) {
+        traverse(child, name);
       }
     }
   }
-  data.forEach((node, index) => {
-    traverse(node, "", startIndex + index);
-  });
+  if (data && data.ImageNetStructure && data.ImageNetStructure.synset && data.ImageNetStructure.synset[0]) {
+    traverse(data.ImageNetStructure.synset[0], "");
+  } else {
+    throw new Error("Invalid data structure");
+  }
   return linearData;
 }
 
 try {
-  const { chunk, startIndex } = workerData;
-  const transformedData = transformToLinear(chunk, startIndex);
+  const transformedData = transformToLinear(workerData);
   parentPort.postMessage(transformedData);
 } catch (error) {
   parentPort.postMessage({ error: error.message });
+  parentPort.close();
 }
