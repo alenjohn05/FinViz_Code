@@ -17,7 +17,7 @@ export async function getTreeData(req: Request, res: Response): Promise<void> {
       const cachedData = await redisClient.get(cacheKey);
       if (cachedData) {
         res.json(JSON.parse(cachedData));
-        return;
+        return;1
       }
     } finally {
       redisPool.release(redisClient);
