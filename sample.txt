@@ -1,0 +1,838 @@
+import express from "express";
+import axios from "axios";
+import xml2js from "xml2js";
+import sqlite3 from "sqlite3";
+import { open, Database } from "sqlite";
+import { createClient } from "redis";
+
+const redisClient = createClient({
+  url: `redis://${process.env.REDIS_HOST || "localhost"}:${process.env.REDIS_PORT || 6379}`,
+});
+redisClient.connect();
+
+const app = express();
+const port = process.env.PORT || 5000;
+
+async function fetchAndParseXML(url: string) {
+  const response = await axios.get(url);
+  const parser = new xml2js.Parser();
+  const result = await parser.parseStringPromise(response.data);
+  return result;
+}
+function transformToLinear(data: any): { name: string; size: number }[] {
+    const linearData: { name: string; size: number }[] = [];
+    function traverse(node: any, path: string) {
+      const name = path ? `${path} > ${node["$"].words}` : node["$"].words;
+      const size = node.synset ? node.synset.length : 0;
+      linearData.push({ name, size });
+      if (node.synset) {
+        for (const child of node.synset) {
+          traverse(child, name);
+        }
+      }
+    }
+    traverse(data.ImageNetStructure.synset[0], "");
+    return linearData;
+  }
+  
+async function insertDataToDB(db: Database, data: { name: string; size: number }[]) {
+  try {
+    const insertQuery = "INSERT INTO ImageNetData (name, size) VALUES (?, ?)";
+    for (const item of data) {
+      await db.run(insertQuery, [item.name, item.size]);
+    }
+  } catch (err) {
+    console.error(err);
+  }
+}
+
+function reconstructTreeFromDB(data: { name: string; size: number }[]): any {
+    const tree: { [key: string]: any } = {};
+    data.forEach(({ name, size }) => {
+      const pathParts = name.split(' > ');
+      let currentLevel = tree;
+
+      pathParts.slice(0, -1).forEach(part => {
+        if (!currentLevel[part]) {
+          currentLevel[part] = { name: part, size: 0, children: {} };
+        }
+        currentLevel = currentLevel[part].children;
+      });
+  
+      const leaf = pathParts[pathParts.length - 1];
+      if (!currentLevel[leaf]) {
+        currentLevel[leaf] = { name: leaf, size, children: {} };
+      } else {
+        currentLevel[leaf].size = size;
+      }
+    });
+  
+    function convertTreeToList(tree: { [key: string]: any }): any[] {
+      return Object.keys(tree).map(key => {
+        const { name, size, children } = tree[key];
+        return { name, size, children: convertTreeToList(children) };
+      });
+    }
+  
+    return convertTreeToList(tree);
+  }
+  
+
+app.get("/", (req, res) => {
+  res.send("Hello, TypeScript with Node.js!");
+});
+
+app.get("/api/getTreeData", async (req, res) => {
+    const cacheKey = "treeData";
+    try {
+      const cachedData = await redisClient.get(cacheKey);
+      if (cachedData) {
+        return res.json(JSON.parse(cachedData));
+      }
+  
+      const db = await open({
+        filename: 'database.db',
+        driver: sqlite3.Database
+      });
+  
+      const result = await db.all("SELECT name, size FROM ImageNetData");
+      const tree = reconstructTreeFromDB(result);
+  
+      await redisClient.set(cacheKey, JSON.stringify(tree));
+      res.json(tree);
+    } catch (err) {
+      if (err instanceof Error) {
+        res.status(500).send(err.message);
+      } else {
+        res.status(500).send("An unknown error occurred");
+      }
+    }
+  });
+  
+
+async function initialize() {
+  try {
+    const db = await open({
+      filename: 'database.db',
+      driver: sqlite3.Database
+    });
+
+    await db.exec(`
+      CREATE TABLE IF NOT EXISTS ImageNetData (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT,
+        size INTEGER
+      )
+    `);
+
+    const url = "https://raw.githubusercontent.com/tzutalin/ImageNet_Utils/master/detection_eval_tools/structure_released.xml";
+    const parsedXML = await fetchAndParseXML(url);
+    console.log(parsedXML)
+    const linearData = transformToLinear(parsedXML);
+    await insertDataToDB(db, linearData);
+
+    console.log("Data ingested, transformed, and stored successfully.");
+  } catch (err) {
+    console.error("Error during initialization:", err);
+  }
+}
+
+app.listen(port, () => {
+  console.log(`Server running at http://localhost:${port}/`);
+  initialize();
+});
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+import express from 'express';
+import axios from 'axios';
+import xml2js from 'xml2js';
+import sqlite3 from 'sqlite3';
+import { open, Database } from 'sqlite';
+import { createClient } from 'redis';
+import { Worker } from 'worker_threads';
+import rateLimit from 'express-rate-limit';
+import { createPool } from 'generic-pool';
+
+// Redis client setup
+const redisClient = createClient({
+  url: `redis://${process.env.REDIS_HOST || "localhost"}:${process.env.REDIS_PORT || 6379}`,
+});
+redisClient.connect();
+
+const app = express();
+const port = process.env.PORT || 5000;
+
+// Database Connection Pooling setup
+const factory = {
+  create: async () => {
+    const db = await open({
+      filename: 'database.db',
+      driver: sqlite3.Database,
+    });
+    await db.exec('PRAGMA journal_mode=WAL;');
+    return db;
+  },
+  destroy: (db: Database) => db.close(),
+};
+
+const dbPool = createPool(factory, {
+  max: 10,
+  min: 2,
+  idleTimeoutMillis: 30000,
+  evictionRunIntervalMillis: 10000,
+});
+
+// Rate limiter
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 100,
+});
+
+app.use(limiter);
+
+async function fetchAndParseXML(url: string) {
+  const response = await axios.get(url);
+  const parser = new xml2js.Parser();
+  const result = await parser.parseStringPromise(response.data);
+  return result;
+}
+
+async function insertDataToDB(data: { name: string; size: number }[]) {
+  const db = await dbPool.acquire();
+  try {
+    await db.run('BEGIN TRANSACTION');
+    const insertQuery = 'INSERT INTO ImageNetData (name, size) VALUES (?, ?)';
+    const stmt = await db.prepare(insertQuery);
+    for (const item of data) {
+      await stmt.run([item.name, item.size]);
+    }
+    await stmt.finalize();
+    await db.run('COMMIT');
+  } catch (err) {
+    await db.run('ROLLBACK');
+    console.error(err);
+  } finally {
+    dbPool.release(db);
+  }
+}
+
+function reconstructTreeFromDB(data: { name: string; size: number }[]): any {
+  const tree: { [key: string]: any } = {};
+  data.forEach(({ name, size }) => {
+    const pathParts = name.split(' > ');
+    let currentLevel = tree;
+    pathParts.slice(0, -1).forEach(part => {
+      if (!currentLevel[part]) {
+        currentLevel[part] = { name: part, size: 0, children: {} };
+      }
+      currentLevel = currentLevel[part].children;
+    });
+    const leaf = pathParts[pathParts.length - 1];
+    if (!currentLevel[leaf]) {
+      currentLevel[leaf] = { name: leaf, size, children: {} };
+    } else {
+      currentLevel[leaf].size = size;
+    }
+  });
+
+  function convertTreeToList(tree: { [key: string]: any }): any[] {
+    return Object.keys(tree).map(key => {
+      const { name, size, children } = tree[key];
+      return { name, size, children: convertTreeToList(children) };
+    });
+  }
+
+  return convertTreeToList(tree);
+}
+
+app.get('/', (req, res) => {
+  res.send('Hello, TypeScript with Node.js!');
+});
+
+app.get('/api/getTreeData', async (req, res) => {
+  const cacheKey = 'treeData';
+  try {
+    const cachedData = await redisClient.get(cacheKey);
+    if (cachedData) {
+      return res.json(JSON.parse(cachedData));
+    }
+
+    const db = await dbPool.acquire();
+    try {
+      const result = await db.all('SELECT name, size FROM ImageNetData');
+      const tree = reconstructTreeFromDB(result);
+      await redisClient.set(cacheKey, JSON.stringify(tree));
+      res.json(tree);
+    } finally {
+      dbPool.release(db);
+    }
+  } catch (err) {
+    if (err instanceof Error) {
+      res.status(500).send(err.message);
+    } else {
+      res.status(500).send('An unknown error occurred');
+    }
+  }
+});
+
+async function initialize() {
+  try {
+    const db = await dbPool.acquire();
+    try {
+      await db.exec(`
+        CREATE TABLE IF NOT EXISTS ImageNetData (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          name TEXT,
+          size INTEGER
+        )
+      `);
+
+      const url = 'https://raw.githubusercontent.com/tzutalin/ImageNet_Utils/master/detection_eval_tools/structure_released.xml';
+      const parsedXML = await fetchAndParseXML(url);
+      console.log(parsedXML);
+      const worker = new Worker('./src/worker.js', { workerData: parsedXML });
+      worker.on('message', async (data) => {
+        await insertDataToDB(data);
+        console.log('Data ingested, transformed, and stored successfully.');
+      });
+      worker.on('error', (error) => {
+        console.error('Worker error:', error);
+      });
+      worker.on('exit', (code) => {
+        if (code !== 0) {
+          console.error(`Worker stopped with exit code ${code}`);
+        }
+      });
+    } finally {
+      dbPool.release(db);
+    }
+  } catch (err) {
+    console.error('Error during initialization:', err);
+  }
+}
+
+app.listen(port, () => {
+  console.log(`Server running at http://localhost:${port}/`);
+  initialize();
+});
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Worker
+const { parentPort, workerData } = require('worker_threads');
+
+function transformToLinear(data) {
+  const linearData = [];
+  function traverse(node, path) {
+    if (!node || !node["$"] || !node["$"].words) {
+      return;
+    }
+    const name = path ? `${path} > ${node["$"].words}` : node["$"].words;
+    const size = node.synset ? node.synset.length : 0;
+    linearData.push({ name, size });
+    if (node.synset) {
+      for (const child of node.synset) {
+        traverse(child, name);
+      }
+    }
+  }
+  if (data && data.ImageNetStructure && data.ImageNetStructure.synset && data.ImageNetStructure.synset[0]) {
+    traverse(data.ImageNetStructure.synset[0], "");
+  } else {
+    throw new Error("Invalid data structure");
+  }
+  return linearData;
+}
+
+try {
+  const transformedData = transformToLinear(workerData);
+  parentPort.postMessage(transformedData);
+} catch (error) {
+  parentPort.postMessage({ error: error.message });
+  parentPort.close();
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+import express from "express";
+import axios from "axios";
+import xml2js from "xml2js";
+import sqlite3 from "sqlite3";
+import { open, Database } from "sqlite";
+import { createClient } from "redis";
+import { Worker } from "worker_threads";
+import rateLimit from "express-rate-limit";
+import { createPool } from "generic-pool";
+import fs from "fs/promises";
+
+// Redis client setup
+const redisClient = createClient({
+  url: `redis://${process.env.REDIS_HOST || "localhost"}:${
+    process.env.REDIS_PORT || 6379
+  }`
+});
+redisClient.connect();
+
+const app = express();
+const port = process.env.PORT || 5000;
+
+// Database Connection Pooling setup
+const factory = {
+  create: async () => {
+    const db = await open({
+      filename: "database.db",
+      driver: sqlite3.Database
+    });
+    await db.exec("PRAGMA journal_mode=WAL;");
+    return db;
+  },
+  destroy: (db: Database) => db.close()
+};
+
+const dbPool = createPool(factory, {
+  max: 10,
+  min: 2,
+  idleTimeoutMillis: 30000,
+  evictionRunIntervalMillis: 10000
+});
+
+// Rate limiter
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 100
+});
+
+app.use(limiter);
+
+async function fetchAndParseXML(url: string) {
+  const response = await axios.get(url);
+  const parser = new xml2js.Parser();
+  const result = await parser.parseStringPromise(response.data);
+  return result;
+}
+
+async function insertDataToDB(data: { name: string; size: number }[]) {
+  const db = await dbPool.acquire();
+  try {
+    await db.run("BEGIN TRANSACTION");
+    const insertQuery = "INSERT INTO ImageNetData (name, size) VALUES (?, ?)";
+    const stmt = await db.prepare(insertQuery);
+    for (const item of data) {
+      await stmt.run([item.name, item.size]);
+    }
+    await stmt.finalize();
+    await db.run("COMMIT");
+  } catch (err) {
+    await db.run("ROLLBACK");
+    console.error(err);
+  } finally {
+    dbPool.release(db);
+  }
+}
+
+function reconstructTreeFromDB(data: { name: string; size: number }[]): any {
+  const tree: { [key: string]: any } = {};
+  data.forEach(({ name, size }) => {
+    const pathParts = name.split(" > ");
+    let currentLevel = tree;
+    pathParts.slice(0, -1).forEach((part) => {
+      if (!currentLevel[part]) {
+        currentLevel[part] = { name: part, size: 0, children: {} };
+      }
+      currentLevel = currentLevel[part].children;
+    });
+    const leaf = pathParts[pathParts.length - 1];
+    if (!currentLevel[leaf]) {
+      currentLevel[leaf] = { name: leaf, size, children: {} };
+    } else {
+      currentLevel[leaf].size = size;
+    }
+  });
+
+  function convertTreeToList(tree: { [key: string]: any }): any[] {
+    return Object.keys(tree).map((key) => {
+      const { name, size, children } = tree[key];
+      return { name, size, children: convertTreeToList(children) };
+    });
+  }
+
+  return convertTreeToList(tree);
+}
+
+app.get("/", (req, res) => {
+  res.send("Hello, TypeScript with Node.js!");
+});
+
+app.get("/api/getTreeData", async (req, res) => {
+  const cacheKey = "treeData";
+  try {
+    const cachedData = await redisClient.get(cacheKey);
+    if (cachedData) {
+      return res.json(JSON.parse(cachedData));
+    }
+
+    const db = await dbPool.acquire();
+    try {
+      const result = await db.all("SELECT name, size FROM ImageNetData");
+      const tree = reconstructTreeFromDB(result);
+      await redisClient.set(cacheKey, JSON.stringify(tree));
+      res.json(tree);
+    } finally {
+      dbPool.release(db);
+    }
+  } catch (err) {
+    if (err instanceof Error) {
+      res.status(500).send(err.message);
+    } else {
+      res.status(500).send("An unknown error occurred");
+    }
+  }
+});
+
+app.get("/api/subcategories/:category", async (req, res) => {
+  const category = req.params.category;
+  const cacheKey = `subcategories_${category}`;
+
+  try {
+    const cachedData = await redisClient.get(cacheKey);
+    // if (cachedData) {
+    //   return res.json(JSON.parse(cachedData));
+    // }
+    const db = await dbPool.acquire();
+    try {
+      const results = await db.all(
+        `
+        SELECT name AS category, size
+        FROM ImageNetData
+        WHERE category LIKE ? || ' > %'
+      `,
+        [category]
+      );
+
+      if (!results.length) {
+        return res.status(404).send("Category not found");
+      }
+
+      const response: {
+        [key: string]: {
+          name: string;
+          size: number;
+          children: string;
+          next: string;
+        };
+      } = {};
+      results.forEach((row) => {
+        const subcategory = row.category
+          .replace(`${category} > `, "")
+          .split(" > ")[0];
+        if (!response[subcategory]) {
+          response[subcategory] = {
+            name: category,
+            size: row.size,
+            children: subcategory,
+            next:`${category} > ${subcategory}`
+          };
+        }
+      });
+
+      const responseArray = Object.values(response);
+
+      await redisClient.set(cacheKey, JSON.stringify(responseArray));
+      res.json(responseArray);
+    } finally {
+      dbPool.release(db);
+    }
+  } catch (err) {
+    console.error("Error fetching subcategories:", err);
+    res.status(500).send("An error occurred while fetching subcategories");
+  }
+});
+
+async function initialize() {
+  try {
+    await fs.unlink("database.db").catch((err) => {
+      if (err.code !== "ENOENT") throw err;
+    });
+    const db = await dbPool.acquire();
+    try {
+      await db.exec(`
+        CREATE TABLE IF NOT EXISTS ImageNetData (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          name TEXT,
+          size INTEGER
+        )
+      `);
+
+      const url =
+        "https://raw.githubusercontent.com/tzutalin/ImageNet_Utils/master/detection_eval_tools/structure_released.xml";
+      const parsedXML = await fetchAndParseXML(url);
+      console.log(parsedXML);
+      const worker = new Worker("./src/worker.js", { workerData: parsedXML });
+      worker.on("message", async (data) => {
+        await insertDataToDB(data);
+        console.log("Data ingested, transformed, and stored successfully.");
+      });
+      worker.on("error", (error) => {
+        console.error("Worker error:", error);
+      });
+      worker.on("exit", (code) => {
+        if (code !== 0) {
+          console.error(`Worker stopped with exit code ${code}`);
+        }
+      });
+    } finally {
+      dbPool.release(db);
+    }
+  } catch (err) {
+    console.error("Error during initialization:", err);
+  }
+}
+
+app.listen(port, () => {
+  console.log(`Server running at http://localhost:${port}/`);
+  initialize();
+});
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+const { parentPort, workerData } = require('worker_threads');
+
+function transformToLinear(data) {
+  const linearData = [];
+  function traverse(node, path) {
+    if (!node || !node["$"] || !node["$"].words) {
+      return;
+    }
+    const name = path ? `${path} > ${node["$"].words}` : node["$"].words;
+    const size = node.synset ? node.synset.length : 0;
+    linearData.push({ name, size });
+    if (node.synset) {
+      for (const child of node.synset) {
+        traverse(child, name);
+      }
+    }
+  }
+  if (data && data.ImageNetStructure && data.ImageNetStructure.synset && data.ImageNetStructure.synset[0]) {
+    traverse(data.ImageNetStructure.synset[0], "");
+  } else {
+    throw new Error("Invalid data structure");
+  }
+  return linearData;
+}
+
+try {
+  const transformedData = transformToLinear(workerData);
+  parentPort.postMessage(transformedData);
+} catch (error) {
+  parentPort.postMessage({ error: error.message });
+  parentPort.close();
+}
+
+
+
+
+app.get("/api/subcategories/:category", async (req, res) => {
+  const category = req.params.category;
+  const cacheKey = `subcategories_${category}`;
+
+  try {
+    const cachedData = await redisClient.get(cacheKey);
+    // if (cachedData) {
+    //   return res.json(JSON.parse(cachedData));
+    // }
+    const db = await dbPool.acquire();
+    try {
+      const results = await db.all(
+        `
+        SELECT name AS category, size
+        FROM ImageNetData
+        WHERE category LIKE ? || ' > %'
+      `,
+        [category]
+      );
+
+      if (!results.length) {
+        return res.status(404).send("Category not found");
+      }
+
+      const response: {
+        [key: string]: {
+          name: string;
+          size: number;
+          children: string;
+          next: string;
+        };
+      } = {};
+      results.forEach((row) => {
+        const subcategory = row.category
+          .replace(`${category} > `, "")
+          .split(" > ")[0];
+        if (!response[subcategory]) {
+          response[subcategory] = {
+            name: category,
+            size: row.size,
+            children: subcategory,
+            next:`${category} > ${subcategory}`
+          };
+        }
+      });
+
+      const responseArray = Object.values(response);
+
+      await redisClient.set(cacheKey, JSON.stringify(responseArray));
+      res.json(responseArray);
+    } finally {
+      dbPool.release(db);
+    }
+  } catch (err) {
+    console.error("Error fetching subcategories:", err);
+    res.status(500).send("An error occurred while fetching subcategories");
+  }
+});
