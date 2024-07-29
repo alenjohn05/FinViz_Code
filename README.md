@@ -7,3 +7,10 @@ I have used Tech stack of Typescript and React
 - Used **Sqlite DB** since SQLite does not support multiple concurrent write transactions, I have used **connection pooling** to manage database access more efficiently
 - **Write-Ahead Logging** for better concurrent access in Sqlite Database
 - Implemented **Redis** caching to reduce database load.
+
+## Running the Application
+
+To run this application, follow these steps:
+
+1. Build the Docker image.
+2. Start the application by running `docker-compose up`.
