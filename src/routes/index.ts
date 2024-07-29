@@ -10,7 +10,7 @@ const limiter = rateLimit(config.rateLimit);
 router.use(limiter);
 
 router.get("/", (req, res) => {
-  res.send("Hello, TypeScript with Node.js!");
+  res.send("Server is Running!");
 });
 
 router.get("/api/getTreeData", getTreeData);
