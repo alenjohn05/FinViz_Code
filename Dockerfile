@@ -1,10 +1,14 @@
 FROM node:21
 WORKDIR /app
 COPY ./app .
-RUN npm i
-RUN npm run build
-RUN ls -l /app/dist
+RUN npm ci && \
+    cd frontend && \
+    npm ci && \
+    npm run build && \
+    cd .. && \
+    npm run build && \
+    ls -l /app/dist && \
+    chown -R node:node /app
 EXPOSE 5000
-RUN chown -R node:node /app
 USER node
 CMD ["npm", "run", "serve"]
