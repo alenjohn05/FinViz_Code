@@ -66,6 +66,5 @@ coverage/
 # Environment configuration files
 *.env*
 
-database.db
 database.db-wal
 database.db-shm
